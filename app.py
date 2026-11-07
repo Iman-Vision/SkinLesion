@@ -1,18 +1,13 @@
 """
-app.py — Deployable Streamlit web app for the HAM10000 skin lesion classifier.
+DERMA.AI — Streamlit frontend for the existing HAM10000 skin lesion classifier.
 
-Run locally:
+Run:
     streamlit run app.py
 
-Deploy for free (pick one):
-    - Streamlit Community Cloud: push this repo to GitHub, point Streamlit Cloud at app.py
-    - Hugging Face Spaces: create a Space with SDK "Streamlit", push these files
-    - Docker: docker build -t skin-classifier . && docker run -p 8501:8501 skin-classifier
-
-Expects, in the same folder (or MODEL_DIR env var):
-    - convnext_final.keras and/or hybrid_final.keras  (from train.py)
-    - label_map.json
-If both models are present, predictions are ensembled (averaged) automatically.
+ML contract (unchanged):
+    - Loads *.keras models + label_map.json from MODEL_DIR
+    - preprocess(): RGB resize → [0,1] float32 batch
+    - predict(): optional flip TTA, mean across loaded models
 """
 
 import os
@@ -23,15 +18,26 @@ import streamlit as st
 from PIL import Image
 import tensorflow as tf
 
+from ui.styles import inject_css
+from ui import pages as ui_pages
+
 MODEL_DIR = os.environ.get('MODEL_DIR', os.path.dirname(os.path.abspath(__file__)))
 LABEL_MAP_PATH = os.path.join(MODEL_DIR, 'label_map.json')
+METRICS_PATH = os.path.join(MODEL_DIR, 'all_metrics.json')
 
 MODEL_CANDIDATES = {
+    'MobileNetV2': os.path.join(MODEL_DIR, 'mobilenet_final.keras'),
     'ConvNeXt-Tiny': os.path.join(MODEL_DIR, 'convnext_final.keras'),
     'Hybrid (ConvNeXt + Transformer)': os.path.join(MODEL_DIR, 'hybrid_final.keras'),
 }
 
-st.set_page_config(page_title='Skin Lesion Classifier', page_icon='🩺', layout='centered')
+
+st.set_page_config(
+    page_title='DERMA.AI',
+    page_icon='◈',
+    layout='wide',
+    initial_sidebar_state='expanded',
+)
 
 
 @st.cache_resource(show_spinner='Loading model(s)...')
@@ -45,16 +51,23 @@ def load_models():
     models = {}
     for name, path in MODEL_CANDIDATES.items():
         if os.path.exists(path):
-            # compile=False: we only need inference, and the custom focal loss
-            # doesn't need to be reconstructed just to call .predict().
+            # compile=False: inference only; custom focal loss need not be reconstructed.
             models[name] = tf.keras.models.load_model(path, compile=False)
 
     if not models:
         return None, label_map, (
             'No trained model files found in ' + MODEL_DIR +
-            '. Expected convnext_final.keras and/or hybrid_final.keras from train.py.'
+            '. Expected mobilenet_final.keras (or convnext_final.keras / hybrid_final.keras) from train.py.'
         )
     return models, label_map, None
+
+
+@st.cache_data
+def load_metrics():
+    if os.path.exists(METRICS_PATH):
+        with open(METRICS_PATH) as f:
+            return json.load(f)
+    return None
 
 
 def preprocess(image: Image.Image, img_size: int) -> np.ndarray:
@@ -76,72 +89,69 @@ def predict(models, arr, use_tta=True):
     return np.mean(all_probs, axis=0)
 
 
-def main():
-    st.title('🩺 Skin Lesion Classifier')
-    st.caption('Deep-learning demo trained on the HAM10000 dermoscopy dataset (7-class).')
+def _init_state():
+    defaults = {
+        'page': 'home',
+        'use_tta': True,
+        'confidence_floor': 0.5,
+        'history': [],
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    st.warning(
-        '**Not a medical device.** This is a research/educational demo only. It has not '
-        'been validated for clinical use, is not FDA-cleared, and must never replace '
-        'evaluation by a qualified dermatologist. If a lesion is changing, bleeding, or '
-        'concerning, please see a doctor.',
-        icon='⚠️'
-    )
+
+def main():
+    _init_state()
+    st.markdown(inject_css(), unsafe_allow_html=True)
 
     models, label_map, error = load_models()
+    metrics = load_metrics()
+
+    with st.sidebar:
+        ui_pages.render_sidebar(
+            active=st.session_state.page,
+            model_names=list(models.keys()) if models else [],
+            metrics=metrics,
+        )
+
     if error:
-        st.error(error)
+        st.markdown(
+            f'<div class="card" style="margin-top:2rem"><div class="card-title">Model unavailable</div>'
+            f'<div class="muted">{error}</div></div>',
+            unsafe_allow_html=True,
+        )
         st.stop()
 
     class_names = label_map['class_names']
-    full_names = label_map['full_names']
     img_size = label_map.get('img_size', 224)
 
-    with st.sidebar:
-        st.subheader('Settings')
-        use_tta = st.checkbox('Test-time augmentation (flip-averaged)', value=True)
-        st.write(f"Loaded model(s): {', '.join(models.keys())}")
-        st.caption('Multiple models loaded → predictions are ensembled automatically.')
-
-    uploaded = st.file_uploader('Upload a dermoscopic image', type=['jpg', 'jpeg', 'png'])
-
-    if uploaded is not None:
-        image = Image.open(uploaded)
-        col1, col2 = st.columns([1, 1.4])
-        with col1:
-            st.image(image, caption='Uploaded image', use_container_width=True)
-
-        with st.spinner('Analyzing...'):
-            arr = preprocess(image, img_size)
-            probs = predict(models, arr, use_tta=use_tta)
-
+    def run_prediction(image: Image.Image):
+        arr = preprocess(image, img_size)
+        probs = predict(models, arr, use_tta=st.session_state.get('use_tta', True))
         top_idx = int(np.argmax(probs))
-        order = np.argsort(probs)[::-1]
+        return {
+            'probs': probs.tolist() if hasattr(probs, 'tolist') else list(map(float, probs)),
+            'top_idx': top_idx,
+            'top_code': class_names[top_idx],
+            'top_conf': float(probs[top_idx]),
+        }
 
-        with col2:
-            st.subheader('Prediction')
-            st.metric(
-                label=full_names.get(class_names[top_idx], class_names[top_idx]),
-                value=f'{probs[top_idx]*100:.1f}% confidence'
-            )
-            st.caption(f'Class code: `{class_names[top_idx]}`')
-
-        st.subheader('Full probability breakdown')
-        for i in order:
-            cls = class_names[i]
-            label = f'{full_names.get(cls, cls)} ({cls})'
-            st.write(label)
-            st.progress(float(probs[i]))
-            st.caption(f'{probs[i]*100:.2f}%')
-
-        st.divider()
-        st.caption(
-            'Top-3 most likely: ' +
-            ', '.join(f'{full_names.get(class_names[i], class_names[i])} ({probs[i]*100:.1f}%)'
-                      for i in order[:3])
-        )
+    page = st.session_state.page
+    if page == 'home':
+        ui_pages.render_home()
+    elif page == 'analyze':
+        ui_pages.render_analyze(models, label_map, run_prediction)
+    elif page == 'results':
+        ui_pages.render_results(label_map)
+    elif page == 'performance':
+        ui_pages.render_performance(metrics, label_map)
+    elif page == 'history':
+        ui_pages.render_history(label_map)
+    elif page == 'about':
+        ui_pages.render_about(models, label_map, metrics)
     else:
-        st.info('Upload a JPG or PNG dermoscopic image to get a prediction.')
+        ui_pages.render_home()
 
 
 if __name__ == '__main__':

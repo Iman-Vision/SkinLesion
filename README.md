@@ -12,23 +12,24 @@ not tied to Colab or a grading rubric.
   predictions with a simple, shareable UI.
 - `requirements.txt`, `Dockerfile` — for running/deploying the app.
 
-## 1. Train (once, wherever you have a GPU)
+## 1. Train (once)
+On a CPU / low-RAM machine use MobileNetV2; on a GPU you can use `hybrid` or `both`.
 ```bash
 python train.py \
-  --metadata_csv /path/to/HAM10000_metadata.csv \
-  --image_dirs /path/to/HAM10000_images_part_1 /path/to/HAM10000_images_part_2 \
+  --metadata_csv ./data/ham10000/HAM10000_metadata.csv \
+  --image_dirs ./data/ham10000/HAM10000_images_part_1 ./data/ham10000/HAM10000_images_part_2 \
   --output_dir ./models \
-  --architecture hybrid \
+  --architecture mobilenet \
   --epochs_head 10 --epochs_finetune 20
 ```
 Use `--architecture both` to train ConvNeXt and the hybrid together — the app will
 automatically ensemble them if both `.keras` files are present, usually a small extra
 accuracy bump over either model alone.
 
-This produces, in `./models`:
-- `hybrid_final.keras` (and/or `convnext_final.keras`)
+This produces, in `./models` (copy into the app folder to deploy):
+- `mobilenet_final.keras` (and/or `hybrid_final.keras` / `convnext_final.keras`)
 - `label_map.json`
-- `*_metrics.json` — accuracy/F1/ROC-AUC on the held-out test set
+- `all_metrics.json` / `*_metrics.json` — accuracy/F1/ROC-AUC on the held-out test set
 
 ## 2. Run the app locally
 ```bash

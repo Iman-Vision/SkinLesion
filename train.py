@@ -15,9 +15,10 @@ Usage:
         --epochs_head 10 --epochs_finetune 20
 
 Architectures:
+    --architecture mobilenet  -> MobileNetV2 (CPU-friendly; recommended for local machines)
     --architecture convnext   -> ConvNeXt-Tiny only (Model 1 from the assignment)
     --architecture hybrid     -> ConvNeXt-Tiny + Transformer encoder (Model 2, usually best accuracy)
-    --architecture both       -> trains both and saves both (for ensembling in the app)
+    --architecture both       -> trains ConvNeXt + hybrid and saves both (for ensembling in the app)
 """
 
 import os
@@ -30,7 +31,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Model
-from tensorflow.keras.applications import ConvNeXtTiny
+from tensorflow.keras.applications import ConvNeXtTiny, MobileNetV2
 from tensorflow.keras.optimizers import AdamW
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
@@ -129,14 +130,20 @@ def augment(img, label):
     return img, label
 
 
-def make_dataset(dataframe, training=False, batch_size=BATCH_SIZE):
+def make_dataset(dataframe, training=False, batch_size=BATCH_SIZE, cache_path=None):
     paths = dataframe['path'].values
     labels = dataframe['label'].values.astype(np.int32)
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
     ds = ds.map(load_and_preprocess, num_parallel_calls=AUTOTUNE)
-    ds = ds.cache()
+    # Disk-backed cache: caching this dataset in RAM (the no-arg ds.cache()
+    # default) needs several GB for HAM10000-sized splits and thrashes on
+    # low-memory machines. A file cache trades a bit of disk I/O for a
+    # bounded memory footprint.
+    ds = ds.cache(cache_path) if cache_path else ds.cache()
     if training:
-        ds = ds.shuffle(2000, seed=SEED)
+        # Buffer holds decoded float32 images (224x224x3 each ~600KB) —
+        # kept small since this machine has very little free RAM.
+        ds = ds.shuffle(512, seed=SEED)
         ds = ds.map(augment, num_parallel_calls=AUTOTUNE)
     ds = ds.batch(batch_size).prefetch(AUTOTUNE)
     return ds
@@ -167,6 +174,26 @@ def build_convnext_model(num_classes, img_size=IMG_SIZE, name='convnext_tiny'):
     inputs = layers.Input(shape=(img_size, img_size, 3), name='input_image')
     x = layers.Rescaling(scale=255.0, name='rescale')(inputs)
     backbone = ConvNeXtTiny(include_top=False, weights='imagenet', input_tensor=x, pooling=None)
+    backbone.trainable = False
+
+    x = backbone.output
+    x = layers.GlobalAveragePooling2D(name='gap')(x)
+    x = layers.LayerNormalization(name='ln_head')(x)
+    x = layers.Dense(512, activation='gelu', name='fc1')(x)
+    x = layers.Dropout(0.4)(x)
+    x = layers.Dense(256, activation='gelu', name='fc2')(x)
+    x = layers.Dropout(0.3)(x)
+    outputs = layers.Dense(num_classes, activation='softmax', dtype='float32', name='predictions')(x)
+    return Model(inputs, outputs, name=name), backbone
+
+
+def build_mobilenet_model(num_classes, img_size=IMG_SIZE, name='mobilenet_v2'):
+    """MobileNetV2 backbone — ~15x fewer FLOPs than ConvNeXt-Tiny at 224x224,
+    the practical choice for CPU-only training."""
+    inputs = layers.Input(shape=(img_size, img_size, 3), name='input_image')
+    # load_and_preprocess yields [0,1]; MobileNetV2 expects [-1,1].
+    x = layers.Rescaling(scale=2.0, offset=-1.0, name='rescale')(inputs)
+    backbone = MobileNetV2(include_top=False, weights='imagenet', input_tensor=x, pooling=None)
     backbone.trainable = False
 
     x = backbone.output
@@ -256,7 +283,9 @@ def train_one(model, backbone, train_ds, val_ds, class_weights, focal_loss,
 
 
 def evaluate(model, test_df, class_names, tag, output_dir):
-    test_ds = make_dataset(test_df, training=False)
+    cache_dir = os.path.join(output_dir, 'tf_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    test_ds = make_dataset(test_df, training=False, cache_path=os.path.join(cache_dir, f'{tag}_test'))
     y_true, y_prob = [], []
     for imgs, labels in test_ds:
         y_prob.extend(model.predict(imgs, verbose=0))
@@ -291,7 +320,7 @@ def main():
     parser.add_argument('--metadata_csv', required=True)
     parser.add_argument('--image_dirs', nargs='+', required=True)
     parser.add_argument('--output_dir', default='./models')
-    parser.add_argument('--architecture', choices=['convnext', 'hybrid', 'both'], default='hybrid')
+    parser.add_argument('--architecture', choices=['convnext', 'hybrid', 'mobilenet', 'both'], default='hybrid')
     parser.add_argument('--epochs_head', type=int, default=10)
     parser.add_argument('--epochs_finetune', type=int, default=20)
     parser.add_argument('--max_oversample_ratio', type=float, default=2.0)
@@ -311,8 +340,10 @@ def main():
     train_df, val_df, test_df = balanced_split(df, args.max_oversample_ratio)
     print(f'Train: {len(train_df)}  Val: {len(val_df)}  Test: {len(test_df)}')
 
-    train_ds = make_dataset(train_df, training=True)
-    val_ds = make_dataset(val_df, training=False)
+    cache_dir = os.path.join(args.output_dir, 'tf_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    train_ds = make_dataset(train_df, training=True, cache_path=os.path.join(cache_dir, 'train'))
+    val_ds = make_dataset(val_df, training=False, cache_path=os.path.join(cache_dir, 'val'))
 
     cw = compute_class_weight('balanced', classes=np.arange(len(class_names)), y=train_df['label'].values)
     class_weights = dict(enumerate(cw))
@@ -329,6 +360,8 @@ def main():
     for arch in architectures:
         if arch == 'convnext':
             model, backbone = build_convnext_model(len(class_names))
+        elif arch == 'mobilenet':
+            model, backbone = build_mobilenet_model(len(class_names))
         else:
             model, backbone = build_hybrid_model(len(class_names))
 

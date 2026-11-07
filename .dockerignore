@@ -1,0 +1,9 @@
+.venv/
+data/
+models/
+__pycache__/
+*.pyc
+.git/
+.claude/
+streamlit.log
+streamlit.err.log
