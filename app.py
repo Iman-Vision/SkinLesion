@@ -1,17 +1,14 @@
 """
-DERMA.AI — Streamlit frontend for the existing HAM10000 skin lesion classifier.
+DERMA.AI — Streamlit Application Entrypoint
+Clinical skin lesion classification and decision-support system on the HAM10000 dataset.
 
 Run:
     streamlit run app.py
-
-ML contract (unchanged):
-    - Loads *.keras models + label_map.json from MODEL_DIR
-    - preprocess(): RGB resize → [0,1] float32 batch
-    - predict(): optional flip TTA, mean across loaded models
 """
 
 import os
 import json
+from typing import Dict, Any, Tuple, Optional
 
 import numpy as np
 import streamlit as st
@@ -21,68 +18,102 @@ import tensorflow as tf
 from ui.styles import inject_css
 from ui import pages as ui_pages
 
-MODEL_DIR = os.environ.get('MODEL_DIR', os.path.dirname(os.path.abspath(__file__)))
+# Directory configuration
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.environ.get('MODEL_DIR', BASE_DIR)
+
 LABEL_MAP_PATH = os.path.join(MODEL_DIR, 'label_map.json')
-METRICS_PATH = os.path.join(MODEL_DIR, 'all_metrics.json')
+METRICS_PATH = os.path.join(MODEL_DIR, 'evaluation_results.json')
+FALLBACK_METRICS_PATH = os.path.join(MODEL_DIR, 'all_metrics.json')
 
 MODEL_CANDIDATES = {
-    'MobileNetV2': os.path.join(MODEL_DIR, 'mobilenet_final.keras'),
-    'ConvNeXt-Tiny': os.path.join(MODEL_DIR, 'convnext_final.keras'),
-    'Hybrid (ConvNeXt + Transformer)': os.path.join(MODEL_DIR, 'hybrid_final.keras'),
+    'MobileNetV2': [
+        os.path.join(MODEL_DIR, 'mobilenet_final.keras'),
+        os.path.join(MODEL_DIR, 'models', 'mobilenet_final.keras')
+    ],
+    'ConvNeXt-Tiny': [
+        os.path.join(MODEL_DIR, 'convnext_final.keras'),
+        os.path.join(MODEL_DIR, 'models', 'convnext_final.keras')
+    ],
+    'Hybrid (ConvNeXt + Transformer)': [
+        os.path.join(MODEL_DIR, 'hybrid_final.keras'),
+        os.path.join(MODEL_DIR, 'models', 'hybrid_final.keras')
+    ]
 }
 
 
 st.set_page_config(
-    page_title='DERMA.AI',
-    page_icon='◈',
+    page_title='DERMA.AI — Intelligent Skin Analysis',
+    page_icon='🔬',
     layout='wide',
-    initial_sidebar_state='expanded',
+    initial_sidebar_state='collapsed',
 )
 
 
-@st.cache_resource(show_spinner='Loading model(s)...')
-def load_models():
-    if not os.path.exists(LABEL_MAP_PATH):
-        return None, None, 'Missing label_map.json — run train.py first and copy its output here.'
+@st.cache_resource(show_spinner='Initializing deep learning models...')
+def load_models() -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[str]]:
+    """Loads trained Keras models and label map dictionary."""
+    label_path = LABEL_MAP_PATH
+    if not os.path.exists(label_path):
+        alt_label_path = os.path.join(MODEL_DIR, 'models', 'label_map.json')
+        if os.path.exists(alt_label_path):
+            label_path = alt_label_path
+        else:
+            return None, None, 'label_map.json not found in model directory.'
 
-    with open(LABEL_MAP_PATH) as f:
-        label_map = json.load(f)
+    try:
+        with open(label_path, 'r', encoding='utf-8') as f:
+            label_map = json.load(f)
+    except Exception as e:
+        return None, None, f'Failed to parse label_map.json: {str(e)}'
 
     models = {}
-    for name, path in MODEL_CANDIDATES.items():
-        if os.path.exists(path):
-            # compile=False: inference only; custom focal loss need not be reconstructed.
-            models[name] = tf.keras.models.load_model(path, compile=False)
+    for name, candidate_paths in MODEL_CANDIDATES.items():
+        for path in candidate_paths:
+            if os.path.exists(path):
+                try:
+                    # compile=False allows inference without custom loss reconstruction
+                    models[name] = tf.keras.models.load_model(path, compile=False)
+                    break
+                except Exception as e:
+                    st.warning(f"Failed to load candidate {name} from {path}: {str(e)}")
 
     if not models:
-        return None, label_map, (
-            'No trained model files found in ' + MODEL_DIR +
-            '. Expected mobilenet_final.keras (or convnext_final.keras / hybrid_final.keras) from train.py.'
-        )
+        return None, label_map, f'No valid .keras model weights discovered in {MODEL_DIR}.'
+
     return models, label_map, None
 
 
 @st.cache_data
-def load_metrics():
-    if os.path.exists(METRICS_PATH):
-        with open(METRICS_PATH) as f:
-            return json.load(f)
+def load_metrics() -> Optional[Dict[str, Any]]:
+    """Loads rigorous evaluation benchmarks from disk."""
+    for path in [METRICS_PATH, FALLBACK_METRICS_PATH]:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                continue
     return None
 
 
-def preprocess(image: Image.Image, img_size: int) -> np.ndarray:
-    image = image.convert('RGB').resize((img_size, img_size))
-    arr = np.array(image, dtype=np.float32) / 255.0
+def preprocess(image: Image.Image, img_size: int = 224) -> np.ndarray:
+    """Preprocesses a PIL Image into a normalized [0, 1] float32 tensor of shape (1, H, W, 3)."""
+    rgb_img = image.convert('RGB').resize((img_size, img_size), Image.Resampling.BILINEAR)
+    arr = np.array(rgb_img, dtype=np.float32) / 255.0
     return np.expand_dims(arr, axis=0)
 
 
-def predict(models, arr, use_tta=True):
-    """Average predictions across all loaded models, optionally with a
-    horizontal-flip TTA pass, for a more stable estimate."""
+def predict(models: Dict[str, Any], arr: np.ndarray, use_tta: bool = True) -> np.ndarray:
+    """
+    Executes model inference across loaded networks.
+    Optionally applies horizontal-flip test-time augmentation (TTA).
+    """
     all_probs = []
     for model in models.values():
         p = model.predict(arr, verbose=0)[0]
         if use_tta:
+            # Horizontal flip pass
             p_flip = model.predict(arr[:, :, ::-1, :], verbose=0)[0]
             p = (p + p_flip) / 2.0
         all_probs.append(p)
@@ -90,10 +121,13 @@ def predict(models, arr, use_tta=True):
 
 
 def _init_state():
+    """Initializes session defaults."""
     defaults = {
         'page': 'home',
+        'theme': 'light',
         'use_tta': True,
-        'confidence_floor': 0.5,
+        'show_gradcam': True,
+        'confidence_floor': 0.50,
         'history': [],
     }
     for key, value in defaults.items():
@@ -103,30 +137,31 @@ def _init_state():
 
 def main():
     _init_state()
-    st.markdown(inject_css(), unsafe_allow_html=True)
+    theme = st.session_state.get('theme', 'light')
+    st.markdown(inject_css(theme), unsafe_allow_html=True)
 
     models, label_map, error = load_models()
     metrics = load_metrics()
 
-    with st.sidebar:
-        ui_pages.render_sidebar(
-            active=st.session_state.page,
-            model_names=list(models.keys()) if models else [],
-            metrics=metrics,
-        )
+    ui_pages.render_top_nav(
+        active=st.session_state.page,
+        model_names=list(models.keys()) if models else [],
+        metrics=metrics,
+    )
 
     if error:
-        st.markdown(
-            f'<div class="card" style="margin-top:2rem"><div class="card-title">Model unavailable</div>'
-            f'<div class="muted">{error}</div></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"""
+<div class="card" style="margin-top: 2rem;">
+  <div class="card-header">Model System Error</div>
+  <div class="workflow-desc" style="color: var(--concern);">{error}</div>
+</div>
+""", unsafe_allow_html=True)
         st.stop()
 
     class_names = label_map['class_names']
     img_size = label_map.get('img_size', 224)
 
-    def run_prediction(image: Image.Image):
+    def run_prediction(image: Image.Image) -> Dict[str, Any]:
         arr = preprocess(image, img_size)
         probs = predict(models, arr, use_tta=st.session_state.get('use_tta', True))
         top_idx = int(np.argmax(probs))

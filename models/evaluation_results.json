@@ -1,0 +1,219 @@
+{
+  "model_name": "MobileNetV2 (HAM10000)",
+  "eval_dataset": "HAM10000 Lesion-Independent Held-Out Test Set",
+  "test_samples": 2004,
+  "accuracy": 0.7445109780439122,
+  "balanced_accuracy": 0.7601438040481502,
+  "precision_macro": 0.5502430286487606,
+  "recall_macro": 0.7601438040481502,
+  "f1_macro": 0.6027373260544282,
+  "f1_weighted": 0.7630364233989246,
+  "roc_auc_macro": 0.9443354727832093,
+  "confusion_matrix": [
+    [
+      40,
+      8,
+      4,
+      12,
+      2,
+      0,
+      0
+    ],
+    [
+      4,
+      84,
+      3,
+      4,
+      3,
+      3,
+      2
+    ],
+    [
+      22,
+      21,
+      114,
+      12,
+      32,
+      19,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      23,
+      0,
+      0,
+      0
+    ],
+    [
+      8,
+      6,
+      18,
+      7,
+      129,
+      51,
+      3
+    ],
+    [
+      5,
+      26,
+      53,
+      59,
+      108,
+      1073,
+      17
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      29
+    ]
+  ],
+  "confusion_matrix_normalized": [
+    [
+      0.6061,
+      0.1212,
+      0.0606,
+      0.1818,
+      0.0303,
+      0.0,
+      0.0
+    ],
+    [
+      0.0388,
+      0.8155,
+      0.0291,
+      0.0388,
+      0.0291,
+      0.0291,
+      0.0194
+    ],
+    [
+      0.1,
+      0.0955,
+      0.5182,
+      0.0545,
+      0.1455,
+      0.0864,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.036,
+      0.027,
+      0.0811,
+      0.0315,
+      0.5811,
+      0.2297,
+      0.0135
+    ],
+    [
+      0.0037,
+      0.0194,
+      0.0395,
+      0.044,
+      0.0805,
+      0.8001,
+      0.0127
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "class_names": [
+    "akiec",
+    "bcc",
+    "bkl",
+    "df",
+    "mel",
+    "nv",
+    "vasc"
+  ],
+  "per_class": {
+    "akiec": {
+      "full_name": "Actinic keratoses",
+      "precision": 0.5063291139240507,
+      "recall": 0.6060606060606061,
+      "f1_score": 0.5517241379310345,
+      "support": 66
+    },
+    "bcc": {
+      "full_name": "Basal cell carcinoma",
+      "precision": 0.5793103448275863,
+      "recall": 0.8155339805825242,
+      "f1_score": 0.6774193548387096,
+      "support": 103
+    },
+    "bkl": {
+      "full_name": "Benign keratosis",
+      "precision": 0.59375,
+      "recall": 0.5181818181818182,
+      "f1_score": 0.5533980582524272,
+      "support": 220
+    },
+    "df": {
+      "full_name": "Dermatofibroma",
+      "precision": 0.19658119658119658,
+      "recall": 1.0,
+      "f1_score": 0.32857142857142857,
+      "support": 23
+    },
+    "mel": {
+      "full_name": "Melanoma",
+      "precision": 0.4708029197080292,
+      "recall": 0.581081081081081,
+      "f1_score": 0.5201612903225806,
+      "support": 222
+    },
+    "nv": {
+      "full_name": "Melanocytic nevi",
+      "precision": 0.9363001745200699,
+      "recall": 0.8001491424310216,
+      "f1_score": 0.862887012464817,
+      "support": 1341
+    },
+    "vasc": {
+      "full_name": "Vascular lesions",
+      "precision": 0.5686274509803921,
+      "recall": 1.0,
+      "f1_score": 0.725,
+      "support": 29
+    }
+  },
+  "class_distribution": {
+    "nv": 1341,
+    "mel": 222,
+    "bkl": 220,
+    "bcc": 103,
+    "akiec": 66,
+    "vasc": 29,
+    "df": 23
+  },
+  "bkl_nv_details": {
+    "bkl_support": 220,
+    "bkl_correct": 114,
+    "bkl_as_nv": 19,
+    "nv_support": 1341,
+    "nv_correct": 1073,
+    "nv_as_bkl": 53
+  }
+}
