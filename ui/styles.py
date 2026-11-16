@@ -87,15 +87,21 @@ html, body, [class*="css"], .stApp {{
 }}
 
 /* Clean up Streamlit default decoration */
-header[data-testid="stHeader"] {{
-  background: transparent !important;
-  height: 0 !important;
-}}
-#MainMenu, footer, .stDeployButton, div[data-testid="stToolbar"] {{
+header[data-testid="stHeader"],
+header[data-testid="stHeader"] *,
+div[data-testid="stDecoration"],
+div[data-testid="stToolbar"],
+div[data-testid="stStatusWidget"],
+#MainMenu, footer, .stDeployButton {{
+  display: none !important;
   visibility: hidden !important;
   height: 0 !important;
+  min-height: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
 }}
 section[data-testid="stSidebar"],
 div[data-testid="collapsedControl"] {{
