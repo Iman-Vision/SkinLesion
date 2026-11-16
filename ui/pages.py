@@ -28,7 +28,11 @@ from .components import (
     probability_bars,
     risk_badge,
 )
-from .explainability import generate_gradcam
+from .explainability import (
+    generate_gradcam,
+    generate_lime_explanation,
+    extract_visual_features_and_explain
+)
 from .report_generator import generate_pdf_report
 from .security import sanitize_text, sanitize_filename, validate_image_bytes
 from .styles import theme_colors
@@ -87,6 +91,12 @@ def render_top_nav(active: str, model_names: List[str], metrics: Dict[str, Any])
                 key='show_gradcam',
                 value=st.session_state.get('show_gradcam', True),
                 help='Calculates convolutional activation maps to visualize model focus.'
+            )
+            st.checkbox(
+                'Generate LIME explanations (XAI)',
+                key='show_lime',
+                value=st.session_state.get('show_lime', True),
+                help='Calculates superpixel perturbation explainability and extracts clinical visual features.'
             )
         with c2:
             st.slider(
@@ -211,25 +221,62 @@ def render_analyze(models: Dict[str, Any], label_map: Dict[str, Any], run_predic
     left_col, right_col = st.columns([1.1, 0.9], gap='large')
 
     with left_col:
-        st.markdown('<div class="card-header">1. Image Intake & Security Validation</div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            'Upload dermoscopic photograph (JPG, JPEG, PNG)',
-            type=['jpg', 'jpeg', 'png'],
-            key='uploader',
-            help='Max file size: 10 MB. Supported formats: JPG, JPEG, PNG.'
-        )
+        st.markdown('<div class="card-header">1. Image Intake (Upload or Copy-Paste)</div>', unsafe_allow_html=True)
 
-        if uploaded is not None:
-            raw_bytes = uploaded.getvalue()
-            # Security and integrity check
-            is_valid, err_msg, validated_pil = validate_image_bytes(raw_bytes, uploaded.name)
-            if not is_valid:
-                st.error(f"Image Rejected: {err_msg}")
-            else:
-                st.session_state.uploaded_bytes = raw_bytes
-                st.session_state.uploaded_name = sanitize_filename(uploaded.name)
-                st.session_state.uploaded_size = len(raw_bytes)
-                st.session_state.validated_pil = validated_pil
+        intake_tab1, intake_tab2 = st.tabs(['📁 Upload Image File', '📋 Paste Image from Clipboard'])
+
+        with intake_tab1:
+            uploaded = st.file_uploader(
+                'Upload dermoscopic photograph (JPG, JPEG, PNG)',
+                type=['jpg', 'jpeg', 'png'],
+                key='uploader',
+                help='Max file size: 10 MB. Supported formats: JPG, JPEG, PNG.'
+            )
+
+            if uploaded is not None:
+                raw_bytes = uploaded.getvalue()
+                # Security and integrity check
+                is_valid, err_msg, validated_pil = validate_image_bytes(raw_bytes, uploaded.name)
+                if not is_valid:
+                    st.error(f"Image Rejected: {err_msg}")
+                else:
+                    st.session_state.uploaded_bytes = raw_bytes
+                    st.session_state.uploaded_name = sanitize_filename(uploaded.name)
+                    st.session_state.uploaded_size = len(raw_bytes)
+                    st.session_state.validated_pil = validated_pil
+
+        with intake_tab2:
+            st.markdown("""
+<div style="font-size: 0.88rem; color: var(--muted); margin-bottom: 0.75rem;">
+  Copy any skin lesion image to your clipboard (using <code>Ctrl+C</code> or right-click &gt; Copy Image), then click the button below to paste it directly into DERMA.AI:
+</div>
+""", unsafe_allow_html=True)
+            try:
+                from streamlit_paste_button import paste_image_button
+                paste_result = paste_image_button(
+                    label="📋 Paste Image from Clipboard",
+                    text_color="#ffffff",
+                    background_color="#0284c7",
+                    hover_background_color="#0369a1",
+                    key="clipboard_paste_btn"
+                )
+                if paste_result and paste_result.image_data is not None:
+                    buf = BytesIO()
+                    paste_result.image_data.convert('RGB').save(buf, format='JPEG', quality=95)
+                    pasted_bytes = buf.getvalue()
+                    is_valid, err_msg, validated_pil = validate_image_bytes(pasted_bytes, "clipboard_image.jpg")
+                    if not is_valid:
+                        st.error(f"Pasted Image Rejected: {err_msg}")
+                    else:
+                        if st.session_state.get('uploaded_bytes') != pasted_bytes:
+                            st.session_state.uploaded_bytes = pasted_bytes
+                            st.session_state.uploaded_name = "clipboard_image.jpg"
+                            st.session_state.uploaded_size = len(pasted_bytes)
+                            st.session_state.validated_pil = validated_pil
+                            st.success("✅ Image successfully pasted from clipboard!")
+                            st.rerun()
+            except Exception as e:
+                st.info(f"Clipboard paste: {str(e)}")
 
         if st.session_state.get('uploaded_bytes') and st.session_state.get('validated_pil'):
             pil_img = st.session_state.validated_pil
@@ -257,29 +304,61 @@ def render_analyze(models: Dict[str, Any], label_map: Dict[str, Any], run_predic
                     st.rerun()
 
             if analyze_clicked:
-                with st.spinner('Executing neural network inference and Grad-CAM extraction...'):
+                with st.spinner('Executing neural network inference and XAI feature extraction...'):
                     result = run_prediction(pil_img)
                     analysis_id = f"DA-{uuid.uuid4().hex[:8].upper()}"
                     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+                    first_model = next(iter(models.values())) if models else None
+                    model_img_size = label_map.get('img_size', 224)
+
                     # Compute Grad-CAM if enabled
                     gradcam_img = None
-                    if st.session_state.get('show_gradcam', True):
+                    if st.session_state.get('show_gradcam', True) and first_model is not None:
                         try:
-                            # Primary model
-                            first_model = next(iter(models.values()))
                             _, gradcam_pil = generate_gradcam(
                                 first_model,
                                 pil_img,
-                                img_size=label_map.get('img_size', 224),
+                                img_size=model_img_size,
                                 target_class_idx=result['top_idx']
                             )
-                            # Convert gradcam PIL to bytes for session state
                             buf = BytesIO()
                             gradcam_pil.save(buf, format='JPEG')
                             gradcam_img = buf.getvalue()
                         except Exception as e:
                             st.warning(f"Grad-CAM note: {str(e)}")
+
+                    # Compute LIME & visual feature extraction
+                    lime_img = None
+                    top_features = None
+                    segments = None
+
+                    if st.session_state.get('show_lime', True) and first_model is not None:
+                        try:
+                            lime_pil, top_features, segments = generate_lime_explanation(
+                                first_model,
+                                pil_img,
+                                target_class_idx=result['top_idx'],
+                                img_size=model_img_size,
+                                num_samples=100
+                            )
+                            buf_lime = BytesIO()
+                            lime_pil.save(buf_lime, format='JPEG')
+                            lime_img = buf_lime.getvalue()
+                        except Exception as e:
+                            st.warning(f"LIME note: {str(e)}")
+
+                    # Generate written clinical feature extraction report
+                    feature_report = extract_visual_features_and_explain(
+                        image=pil_img,
+                        top_code=result['top_code'],
+                        top_conf=result['top_conf'],
+                        probs=result['probs'],
+                        class_names=label_map['class_names'],
+                        full_names=label_map['full_names'],
+                        top_features=top_features,
+                        segments=segments
+                    )
 
                     full_result = {
                         **result,
@@ -288,6 +367,8 @@ def render_analyze(models: Dict[str, Any], label_map: Dict[str, Any], run_predic
                         'filename': fname,
                         'image_bytes': st.session_state.uploaded_bytes,
                         'gradcam_bytes': gradcam_img,
+                        'lime_bytes': lime_img,
+                        'feature_report': feature_report,
                     }
 
                     st.session_state.last_result = full_result
@@ -377,21 +458,29 @@ def render_results(label_map: Dict[str, Any]):
     c1, c2 = st.columns([1.0, 1.2], gap='large')
 
     with c1:
-        st.markdown('<div class="card"><div class="card-header">Submitted Lesion</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><div class="card-header">Submitted Lesion & Explainability</div>', unsafe_allow_html=True)
         if result.get('image_bytes'):
             orig_pil = Image.open(BytesIO(result['image_bytes']))
-            # Grad-CAM toggle display
             has_gradcam = result.get('gradcam_bytes') is not None
-            if has_gradcam:
-                tab_orig, tab_cam = st.tabs(['Standard Image', 'Grad-CAM Attention Heatmap'])
-                with tab_orig:
-                    st.image(orig_pil, use_column_width=True)
-                with tab_cam:
+            has_lime = result.get('lime_bytes') is not None
+
+            tabs = st.tabs(['Standard Image', 'Grad-CAM Attention Heatmap', 'LIME Superpixels'])
+            with tabs[0]:
+                st.image(orig_pil, use_column_width=True)
+            with tabs[1]:
+                if has_gradcam:
                     cam_pil = Image.open(BytesIO(result['gradcam_bytes']))
                     st.image(cam_pil, use_column_width=True)
-                    st.caption("Thermal overlay highlights regional feature importance for the predicted category.")
-            else:
-                st.image(orig_pil, use_column_width=True)
+                    st.caption("Grad-CAM thermal overlay: High-attention regions (red/coral) indicate neural activation foci for this diagnosis.")
+                else:
+                    st.info("Grad-CAM visualization was not generated for this image.")
+            with tabs[2]:
+                if has_lime:
+                    lime_pil = Image.open(BytesIO(result['lime_bytes']))
+                    st.image(lime_pil, use_column_width=True)
+                    st.caption("LIME Superpixel Decomposition: Green regions provide positive evidence supporting this diagnosis; gold boundaries segment histological zones.")
+                else:
+                    st.info("LIME superpixel decomposition was not pre-computed.")
 
         safe_id = sanitize_text(analysis_id)
         safe_fname = sanitize_text(filename)
@@ -422,20 +511,136 @@ def render_results(label_map: Dict[str, Any]):
 """, unsafe_allow_html=True)
 
         # Contextual Clinical Alerts
-        if is_uncertain:
+        if result.get('clinical_override'):
+            st.error(
+                f"🛡️ **Clinical Safety Priority Protocol Applied:** While statistical frequency suggested a benign "
+                f"growth, the neural network detected significant risk markers for **Melanoma ({top_conf*100:.1f}%)**. "
+                f"In accordance with clinical safety guidelines, Melanoma is elevated as the primary referral finding to eliminate false reassurance and ensure prompt medical evaluation."
+            )
+        elif is_high_risk:
+            st.error(
+                f"🚨 **Priority Referral Alert:** **{top_name}** belongs to a malignant or premalignant "
+                f"diagnostic category. In-person clinical dermoscopy and histological biopsy should be prioritized immediately."
+            )
+        elif is_uncertain:
             st.warning(
                 f"**Clinical Caution:** The model's top confidence ({top_conf*100:.1f}%) is below your "
                 f"{floor*100:.0f}% confidence floor. The lesion exhibits ambiguous dermoscopic visual features "
                 f"(such as overlapping patterns between BKL and NV)."
             )
-        if is_high_risk:
-            st.error(
-                f"**Priority Referral Alert:** **{top_name}** belongs to a malignant or premalignant "
-                f"diagnostic category. In-person clinical dermoscopy and histological biopsy should be prioritized."
-            )
+
+        # Secondary melanoma suspicion alert if leading class is benign but mel is notable
+        mel_idx = class_names.index('mel') if 'mel' in class_names else -1
+        if top_code not in HIGH_RISK_CLASSES and mel_idx >= 0:
+            mel_prob = float(probs[mel_idx])
+            if mel_prob >= 0.12:
+                st.warning(
+                    f"⚠️ **Differential Finding — Secondary Melanoma Suspicion ({mel_prob*100:.1f}%):** "
+                    f"Although primarily classified as {top_name}, the model detected an elevated secondary "
+                    f"probability for Melanoma ({mel_prob*100:.1f}%). Routine dermatological monitoring or biopsy is recommended if the lesion is evolving."
+                )
 
     # Full Horizontal Probability Distribution
     st.markdown(probability_bars(class_names, full_names, probs), unsafe_allow_html=True)
+
+    # ── Dual-Audience Explainable AI (XAI): Layman & Doctor ─────────────────────
+    feat_rep = result.get('feature_report')
+    if not feat_rep and result.get('image_bytes'):
+        try:
+            orig_img = Image.open(BytesIO(result['image_bytes']))
+            feat_rep = extract_visual_features_and_explain(
+                orig_img,
+                top_code,
+                top_conf,
+                probs,
+                class_names,
+                full_names
+            )
+        except Exception:
+            feat_rep = None
+
+    if feat_rep:
+        st.markdown("""
+<div style="margin-top: 1.5rem; margin-bottom: 0.6rem;">
+  <h3 style="margin-bottom: 0.15rem; font-size: 1.25rem;">🔬 AI Explanation & Action Guide</h3>
+  <div style="font-size: 0.88rem; color: var(--muted);">Understand what was detected in plain English or review the clinical dermoscopic criteria.</div>
+</div>
+""", unsafe_allow_html=True)
+
+        tab_layman, tab_doctor = st.tabs(['👤 For Patients (Plain English)', '🩺 For Doctors (Clinical Criteria)'])
+
+        with tab_layman:
+            lay = feat_rep.get('layman_guide', {})
+            l_col1, l_col2 = st.columns([1.1, 1.0], gap="large")
+            with l_col1:
+                st.markdown(f"""
+<div class="card card-tight" style="margin-bottom: 0.85rem;">
+  <div class="workflow-step">WHAT IS THIS?</div>
+  <div style="font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 0.35rem;">
+    {feat_rep.get('layman_name', top_name)}
+  </div>
+  <div style="font-size: 0.92rem; line-height: 1.55; color: var(--text);">
+    {lay.get('what_is_it', '')}
+  </div>
+</div>
+<div class="card card-tight">
+  <div class="workflow-step">WHY DID THE AI CHOOSE THIS?</div>
+  <div style="font-size: 0.92rem; line-height: 1.55; color: var(--text);">
+    {lay.get('what_ai_saw', '')}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+            with l_col2:
+                advice_border = "var(--primary)"
+                if "Immediate" in feat_rep.get('risk_tier', '') or is_high_risk or result.get('clinical_override'):
+                    advice_border = "#e11d48"
+                elif "Moderate" in feat_rep.get('risk_tier', ''):
+                    advice_border = "#f59e0b"
+
+                st.markdown(f"""
+<div class="card card-tight" style="border-left: 4px solid {advice_border}; height: 100%;">
+  <div class="workflow-step">RECOMMENDED ACTION FOR YOU</div>
+  <div style="font-size: 0.94rem; line-height: 1.6; color: var(--text); margin-bottom: 1rem;">
+    {lay.get('action_advice', '')}
+  </div>
+  <div style="margin-top: auto; padding-top: 0.75rem; border-top: 1px solid var(--border); font-size: 0.82rem; color: var(--muted);">
+    <strong>Important:</strong> AI analysis is an assistive tool, not a doctor. If you notice changing shape, bleeding, or itching, always consult a licensed dermatologist.
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        with tab_doctor:
+            doc = feat_rep.get('doctor_guide', {})
+            d_col1, d_col2 = st.columns([1.1, 1.0], gap="large")
+            with d_col1:
+                st.markdown(f"""
+<div class="card card-tight" style="margin-bottom: 0.85rem;">
+  <div class="workflow-step">DERMOSCOPIC BIOMARKERS DETECTED</div>
+  <div style="font-size: 0.85rem; color: var(--muted); margin-bottom: 0.4rem;">
+    Primary Salience Focus: <strong>{doc.get('focus_area', 'Lesion body')}</strong>
+  </div>
+""", unsafe_allow_html=True)
+                for bm in doc.get('biomarkers', feat_rep.get('extracted_biomarkers', [])):
+                    st.markdown(f"• **{bm}**")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with d_col2:
+                st.markdown(f"""
+<div class="card card-tight" style="height: 100%;">
+  <div class="workflow-step">DIFFERENTIAL & CLINICAL ACTION</div>
+  <div style="font-size: 0.9rem; line-height: 1.5; color: var(--text); margin-bottom: 0.75rem;">
+    {feat_rep['differential_text']}
+  </div>
+  <div style="background: var(--surface-2); border-radius: 6px; padding: 0.75rem; margin-top: 0.5rem;">
+    <div style="font-size: 0.78rem; font-weight: 700; text-transform: uppercase; color: var(--muted); margin-bottom: 0.2rem;">Recommended Protocol</div>
+    <div style="font-size: 0.88rem; font-weight: 600; color: var(--text);">{doc.get('clinical_action', 'Clinical follow-up')}</div>
+  </div>
+  <div style="margin-top: 0.75rem; font-size: 0.82rem; color: var(--muted);">
+    Secondary Consideration: <strong>{feat_rep['runner_up_name']}</strong> ({feat_rep['runner_up_conf']*100:.1f}%)
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
     # Action Toolbar
     act_col1, act_col2, act_col3 = st.columns([1.1, 1.0, 1.0])
@@ -492,15 +697,15 @@ def render_performance(metrics: Dict[str, Any], label_map: Dict[str, Any]):
 
     # Primary metric tiles
     summary_metrics = {
-        'accuracy': 0.7445,
-        'balanced_accuracy': 0.7601,
-        'f1_macro': 0.6027,
-        'roc_auc_macro': 0.9443
+        'accuracy': 0.8357,
+        'balanced_accuracy': 0.6835,
+        'f1_macro': 0.7079,
+        'roc_auc_macro': 0.9632
     }
     st.markdown(metric_tiles(summary_metrics), unsafe_allow_html=True)
 
     # Interactive Confusion Matrix
-    st.markdown('<div class="card"><div class="card-header">Multi-Class Confusion Matrix (Held-Out Test Set: 2,004 Images)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-header">Multi-Class Confusion Matrix (Held-Out Test Set: 1,503 Images)</div>', unsafe_allow_html=True)
 
     class_names = label_map['class_names']
     full_names = label_map['full_names']
@@ -559,15 +764,15 @@ def render_performance(metrics: Dict[str, Any], label_map: Dict[str, Any]):
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Per-Class Precision, Recall, and F1 Breakdown Table
-    st.markdown('<div class="card"><div class="card-header">Per-Class Clinical Performance Profile</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-header">Per-Class Clinical Performance Profile (Model 2: EfficientNetV2B3 + Cross-Attention)</div>', unsafe_allow_html=True)
     per_class_data = [
-        {"Category": "AKIEC (Actinic keratoses)", "Precision": "50.6%", "Recall": "60.6%", "F1-Score": "55.2%", "Support": "66", "Tier": "Higher Concern"},
-        {"Category": "BCC (Basal cell carcinoma)", "Precision": "57.9%", "Recall": "81.6%", "F1-Score": "67.7%", "Support": "103", "Tier": "Higher Concern"},
-        {"Category": "BKL (Benign keratosis)", "Precision": "59.4%", "Recall": "51.8%", "F1-Score": "55.3%", "Support": "220", "Tier": "Usually Benign"},
-        {"Category": "DF (Dermatofibroma)", "Precision": "19.7%", "Recall": "100.0%", "F1-Score": "32.9%", "Support": "23", "Tier": "Usually Benign"},
-        {"Category": "MEL (Melanoma)", "Precision": "47.1%", "Recall": "58.1%", "F1-Score": "52.0%", "Support": "222", "Tier": "Higher Concern"},
-        {"Category": "NV (Melanocytic nevi)", "Precision": "93.6%", "Recall": "80.0%", "F1-Score": "86.3%", "Support": "1,341", "Tier": "Usually Benign"},
-        {"Category": "VASC (Vascular lesions)", "Precision": "56.9%", "Recall": "100.0%", "F1-Score": "72.5%", "Support": "29", "Tier": "Usually Benign"},
+        {"Category": "AKIEC (Actinic keratoses)", "Precision": "84.0%", "Recall": "42.9%", "F1-Score": "56.8%", "Support": "49", "Tier": "Higher Concern"},
+        {"Category": "BCC (Basal cell carcinoma)", "Precision": "80.6%", "Recall": "64.9%", "F1-Score": "71.9%", "Support": "77", "Tier": "Higher Concern"},
+        {"Category": "BKL (Benign keratosis)", "Precision": "60.6%", "Recall": "78.2%", "F1-Score": "68.3%", "Support": "165", "Tier": "Usually Benign"},
+        {"Category": "DF (Dermatofibroma)", "Precision": "56.3%", "Recall": "52.9%", "F1-Score": "54.5%", "Support": "17", "Tier": "Usually Benign"},
+        {"Category": "MEL (Melanoma)", "Precision": "56.9%", "Recall": "66.5%", "F1-Score": "61.3%", "Support": "167", "Tier": "Higher Concern"},
+        {"Category": "NV (Melanocytic nevi)", "Precision": "94.3%", "Recall": "91.3%", "F1-Score": "92.7%", "Support": "1,006", "Tier": "Usually Benign"},
+        {"Category": "VASC (Vascular lesions)", "Precision": "100.0%", "Recall": "81.8%", "F1-Score": "90.0%", "Support": "22", "Tier": "Usually Benign"},
     ]
     st.dataframe(pd.DataFrame(per_class_data), use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)

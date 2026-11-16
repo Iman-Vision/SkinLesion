@@ -22,7 +22,11 @@ from ui.security import (
     JPEG_MAGIC,
     PNG_MAGIC
 )
-from ui.explainability import generate_gradcam
+from ui.explainability import (
+    generate_gradcam,
+    generate_lime_explanation,
+    extract_visual_features_and_explain
+)
 from ui.report_generator import generate_pdf_report
 from app import preprocess, predict, load_models, _init_state
 
@@ -138,7 +142,7 @@ class TestModelPipeline:
     def test_model_loading_and_input_shape(self, loaded_model_suite):
         models, label_map = loaded_model_suite
         model = next(iter(models.values()))
-        assert model.input_shape == (None, 224, 224, 3)
+        assert model.input_shape in [(None, 224, 224, 3), (None, 300, 300, 3)]
         assert model.output_shape == (None, 7)
 
     def test_class_mapping_consistency(self, loaded_model_suite):
@@ -201,6 +205,91 @@ class TestExplainability:
         assert heatmap.max() <= 1.0
         assert isinstance(blended, Image.Image)
         assert blended.size == img.size
+
+    def test_lime_explanation_generation(self):
+        """Tests LIME superpixel segmentation and overlay creation."""
+        models, label_map, _ = load_models()
+        model = next(iter(models.values()))
+        img = Image.new('RGB', (224, 224), color=(150, 100, 80))
+
+        lime_pil, top_feats, segments = generate_lime_explanation(
+            model,
+            img,
+            target_class_idx=5,
+            img_size=224,
+            num_samples=25,
+            num_features=3
+        )
+
+        assert isinstance(lime_pil, Image.Image)
+        assert lime_pil.size == img.size
+        assert isinstance(top_feats, list)
+        assert len(top_feats) > 0
+        assert isinstance(segments, np.ndarray)
+        assert segments.shape[0] in (224, 300)
+        assert segments.shape[1] in (224, 300)
+
+    def test_visual_feature_extraction_text_generation(self):
+        """Tests algorithmic extraction of visual biomarkers and written clinical explanation."""
+        img = Image.new('RGB', (224, 224), color=(130, 85, 65))
+        class_names = ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']
+        full_names = {
+            'akiec': 'Actinic keratoses', 'bcc': 'Basal cell carcinoma',
+            'bkl': 'Benign keratosis', 'df': 'Dermatofibroma',
+            'mel': 'Melanoma', 'nv': 'Melanocytic nevi', 'vasc': 'Vascular lesions'
+        }
+        probs = [0.02, 0.03, 0.05, 0.01, 0.72, 0.15, 0.02]
+
+        report = extract_visual_features_and_explain(
+            image=img,
+            top_code='mel',
+            top_conf=0.72,
+            probs=probs,
+            class_names=class_names,
+            full_names=full_names
+        )
+
+        assert isinstance(report, dict)
+        assert 'primary_location' in report
+        assert 'extracted_biomarkers' in report
+        assert len(report['extracted_biomarkers']) >= 3
+        assert 'summary_paragraph' in report
+        assert 'differential_text' in report
+        assert 'Melanoma' in report['summary_paragraph']
+        assert '72.0%' in report['summary_paragraph']
+        assert 'runner_up_name' in report
+        assert report['runner_up_name'] == 'Melanocytic nevi'
+
+    def test_melanoma_vs_nevus_feature_extraction_distinction(self):
+        """Tests that Melanoma extracts irregular/asymmetric biomarkers whereas Nevus extracts regular/symmetric biomarkers."""
+        img = Image.new('RGB', (224, 224), color=(140, 90, 70))
+        class_names = ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']
+        full_names = {c: c for c in class_names}
+
+        # Melanoma case
+        mel_report = extract_visual_features_and_explain(
+            image=img,
+            top_code='mel',
+            top_conf=0.85,
+            probs=[0.01, 0.01, 0.02, 0.01, 0.85, 0.09, 0.01],
+            class_names=class_names,
+            full_names=full_names
+        )
+        # Nevus case
+        nv_report = extract_visual_features_and_explain(
+            image=img,
+            top_code='nv',
+            top_conf=0.88,
+            probs=[0.01, 0.01, 0.02, 0.01, 0.06, 0.88, 0.01],
+            class_names=class_names,
+            full_names=full_names
+        )
+
+        mel_text = " ".join(mel_report['extracted_biomarkers']).lower()
+        nv_text = " ".join(nv_report['extracted_biomarkers']).lower()
+
+        assert "irregular" in mel_text or "asymmetry" in mel_text
+        assert "regular" in nv_text or "symmetry" in nv_text
 
 
 # ============================================================================ #

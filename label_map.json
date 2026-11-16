@@ -1,0 +1,32 @@
+{
+  "class_names": [
+    "akiec",
+    "bcc",
+    "bkl",
+    "df",
+    "mel",
+    "nv",
+    "vasc"
+  ],
+  "label2idx": {
+    "akiec": 0,
+    "bcc": 1,
+    "bkl": 2,
+    "df": 3,
+    "mel": 4,
+    "nv": 5,
+    "vasc": 6
+  },
+  "full_names": {
+    "akiec": "Actinic keratoses",
+    "bcc": "Basal cell carcinoma",
+    "bkl": "Benign keratosis",
+    "df": "Dermatofibroma",
+    "mel": "Melanoma",
+    "nv": "Melanocytic nevi",
+    "vasc": "Vascular lesions"
+  },
+  "img_size": 224,
+  "architecture": "Hybrid CNN-Transformer (DenseNet121 + MHSA ViT)",
+  "updated_at": "2026-11-14T23:29:05.896826"
+}

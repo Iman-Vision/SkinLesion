@@ -4,33 +4,51 @@ Calculates Class Activation Maps (Grad-CAM) using the target convolutional layer
 and overlays heatmaps onto original dermoscopic lesions.
 """
 
-from typing import Tuple
+from typing import Tuple, Optional, List, Dict, Any
 import numpy as np
 import tensorflow as tf
 from PIL import Image
 
+# Re-export LIME and feature extraction capabilities
+from .xai_explainer import (
+    generate_lime_explanation,
+    extract_visual_features_and_explain,
+    DERMOSCOPIC_CRITERIA
+)
 
-def generate_gradcam(model, image: Image.Image, img_size: int = 224, target_class_idx: int = None) -> Tuple[np.ndarray, Image.Image]:
+
+
+def generate_gradcam(model, image: Image.Image, img_size: int = None, target_class_idx: int = None) -> Tuple[np.ndarray, Image.Image]:
     """
     Computes Grad-CAM for the given PIL image and model.
+    Dynamically respects model input shape (e.g. 300x300 vs 224x224).
     Returns: (raw_heatmap_2d, blended_pil_image)
     """
-    # Find last 4D conv layer
-    last_conv_layer_name = 'Conv_1'
-    try:
-        last_conv_layer = model.get_layer(last_conv_layer_name)
-    except ValueError:
-        # Fallback: scan backwards for Conv2D or DepthwiseConv2D layer
-        last_conv_layer = None
-        for layer in reversed(model.layers):
-            if 'conv' in layer.name.lower() and len(layer.output.shape) == 4:
+    # Detect target spatial dimension from model input if available
+    if img_size is None or img_size == 224:
+        if hasattr(model, 'input_shape') and model.input_shape and len(model.input_shape) >= 3:
+            h = model.input_shape[1]
+            if h is not None:
+                img_size = h
+    if img_size is None:
+        img_size = 224
+
+    # Find last 4D conv/activation layer
+    last_conv_layer = None
+    for layer in reversed(model.layers):
+        out = getattr(layer, 'output', None)
+        if out is not None and not isinstance(out, (list, tuple)) and len(getattr(out, 'shape', [])) == 4:
+            if any(k in layer.name.lower() for k in ['conv', 'activation', 'block']):
                 last_conv_layer = layer
                 break
-        if last_conv_layer is None:
-            raise ValueError("No suitable 4D convolutional layer found in model for Grad-CAM.")
+    if last_conv_layer is None:
+        raise ValueError("No suitable 4D convolutional layer found in model for Grad-CAM.")
 
     # Target predictions layer
-    pred_layer = model.get_layer('predictions')
+    try:
+        pred_layer = model.get_layer('predictions')
+    except (ValueError, KeyError):
+        pred_layer = model.layers[-1]
 
     # Construct gradient model
     grad_model = tf.keras.models.Model(
